@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# The public SerialPort.hpp includes <boost/asio.hpp> on desktop platforms
+# (no pimpl by design), so consumers need Boost headers as well.
+if(NOT ANDROID)
+    find_dependency(Boost)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/crossserialTargets.cmake")
+
+check_required_components(crossserial)

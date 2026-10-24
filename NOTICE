@@ -1,0 +1,25 @@
+NOTICE for crossserial
+======================
+
+This product includes software developed as part of the crossserial project.
+
+crossserial is licensed under the GNU Lesser General Public License v3.0 or
+later; see LICENSE for the full text.
+
+Third-party components
+----------------------
+
+usb-serial-for-android (Android only)
+  Used on Android for USB-serial chipset drivers (FTDI, CP21xx, CH34x, PL2303,
+  CDC/ACM, ...). Its sources are vendored under third_party/usb-serial-for-android/
+  and compiled into an embedded classes.dex at build time (loaded at runtime via
+  a DexClassLoader; see docs/android.md).
+  Copyright (C) 2013 Google Inc. and later contributors
+  (https://github.com/kai-morich/usb-serial-for-android)
+  Licensed under the Apache License, Version 2.0; see that directory for the
+  license text (LICENSE.txt).
+
+boost (boost::asio) (Linux/Windows only)
+  Used for portable serial I/O (header-only usage; the public header includes
+  <boost/asio.hpp>, so consumers need Boost headers as well).
+  Distributed under the Boost Software License, Version 1.0.

@@ -1,0 +1,63 @@
+plugins {
+    id 'com.android.library'
+    id 'maven-publish'
+}
+
+android {
+    compileSdkVersion 35
+
+    defaultConfig {
+        minSdkVersion 17
+        targetSdkVersion 35
+        consumerProguardFiles 'proguard-rules.pro'
+        
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments = [                    // Raspi   Windows   LinuxVM   ...
+                'rfc2217_server_host': '192.168.0.124',
+                'rfc2217_server_nonstandard_baudrates': 'true',   // true    false     false
+        ]
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    namespace 'com.hoho.android.usbserial'
+    publishing {
+        // if coverage is enabled, change 'release' to 'anyDeviceRelease' or comment out publishing rule
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    implementation "androidx.annotation:annotation:1.10.0"
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.mockito:mockito-core:5.17.0' // later versions require new Java version: Unsupported class file major version 68
+    androidTestImplementation 'androidx.appcompat:appcompat:1.6.1' // later versions have minsdk 21
+    androidTestImplementation 'androidx.test:core:1.5.0' // later versions have minsdk 19
+    androidTestImplementation 'androidx.test:runner:1.5.2' // later versions have minsdk 19
+    androidTestImplementation 'commons-net:commons-net:3.9.0' // later versions fail on old Android devices with missing java.time.Duration class
+    androidTestImplementation 'org.apache.commons:commons-lang3:3.20.0'
+}
+
+// gradle task: publishToMavenLocal
+project.afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+
+                // values used for local maven repo, jitpack uses github release:
+                groupId 'com.github.mik3y'
+                artifactId 'usb-serial-for-android'
+                version '3.9.1beta'
+            }
+        }
+    }
+}
+
+//apply from: 'coverage.gradle'
