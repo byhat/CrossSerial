@@ -86,6 +86,18 @@ bool SerialPort::open(OpenMode mode)
     clearError();
     applyOptions();
     applyNativeMode();
+
+    // Purge bytes that arrived while the port was closed (and any the driver
+    // still holds): delivering them first would front-run fresh data with
+    // stale bytes. Must happen before the read loop is armed - once a read is
+    // in flight the kernel hands it those bytes and no flush can recall them.
+    // QSerialPort purges on open for the same reason.
+#if defined(_WIN32)
+    ::PurgeComm(port_.native_handle(), PURGE_RXCLEAR | PURGE_TXCLEAR);
+#else
+    ::tcflush(port_.native_handle(), TCIOFLUSH);
+#endif
+
     {
         std::lock_guard<std::mutex> lk(bufMx_);
         head_ = end_ = 0;
