@@ -52,7 +52,11 @@ function(crossserial_embed_dex TARGET_NAME)
 
     # Minimal stubs (androidx.annotation.IntDef, BuildConfig) so the vendored
     # usb-serial-for-android sources compile with plain javac, no Gradle/AndroidX.
-    set(CS_STUBS_DIR "${CMAKE_SOURCE_DIR}/android/stubs")
+    # CS_DEX_MODULE_DIR (= <crossserial>/cmake), not CMAKE_SOURCE_DIR: when
+    # crossserial is consumed via add_subdirectory(), the top-level source dir
+    # belongs to the consumer and has no android/stubs.
+    set(CS_STUBS_DIR "${CS_DEX_MODULE_DIR}/../android/stubs")
+    cmake_path(SET CS_STUBS_DIR NORMALIZE "${CS_STUBS_DIR}")
     file(GLOB_RECURSE CS_STUBS_JAVA "${CS_STUBS_DIR}/*.java")
 
     set(CS_ALL_JAVA ${CS_BRIDGE_JAVA} ${CS_USBSERIAL_JAVA} ${CS_STUBS_JAVA})
