@@ -24,6 +24,7 @@
 namespace cs {
 
 namespace detail { struct AndroidAccess; }
+namespace detail { struct WinRxState; }
 
 #if defined(__ANDROID__)
 /** Android only: one-time init. Call once before first use, passing the
@@ -187,6 +188,19 @@ private:
     std::thread         readThread_;
     std::atomic<bool>   closing_{false};  // our own teardown in progress
     std::mutex          writeMx_;         // serializes concurrent write() calls
+
+#if defined(_WIN32)
+    // Windows reader, QSerialPort-style: WaitCommEvent(EV_RXCHAR) wakes the
+    // thread the moment bytes land, then a drain ReadFile takes everything the
+    // driver holds. asio has no WaitCommEvent, and its plain overlapped
+    // ReadFile completes only on buffer-full or COMMTIMEOUTS - whose driver
+    // side granularity (~10 ms) showed up as latency after every burst.
+    // io_/work_/readThread_ stay idle on Windows (write() is synchronous and
+    // needs no io_context::run).
+    void eventLoop();  // runs on evThread_
+    std::thread evThread_;
+    std::unique_ptr<detail::WinRxState> winRx_;
+#endif
 #endif
 };
 

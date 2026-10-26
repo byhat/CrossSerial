@@ -5,6 +5,12 @@
 #include <cstring>
 #include <utility>
 
+#if defined(_WIN32)
+// ~SerialPort destroys the unique_ptr<WinRxState> member: the type must be
+// complete in this TU on Windows.
+#include "detail/WinRxState.hpp"
+#endif
+
 namespace cs {
 
 namespace {

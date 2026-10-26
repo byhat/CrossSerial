@@ -10,6 +10,8 @@
 #include <thread>
 #include <utility>
 
+#include "detail/WinRxState.hpp"
+
 #if !defined(_WIN32)
 #  include <fcntl.h>
 #  include <termios.h>
@@ -105,6 +107,24 @@ bool SerialPort::open(OpenMode mode)
 
     closing_ = false;
     reading_ = true;
+
+#if defined(_WIN32)
+    // Event-driven reader: EV_RXCHAR wakes us the moment bytes land; no
+    // COMMTIMEOUTS tick to wait out after each burst (see eventLoop).
+    if (!::SetCommMask(port_.native_handle(), EV_RXCHAR | EV_ERR)) {
+        fail(SerialError::ResourceError,
+             "SetCommMask: error " + std::to_string(::GetLastError()));
+        reading_ = false;
+        boost::system::error_code ec2;
+        port_.close(ec2);
+        return false;
+    }
+    winRx_ = std::make_unique<detail::WinRxState>();
+    winRx_->scratch.assign(kReadChunk, 0);
+    if (!evThread_.joinable())
+        evThread_ = std::thread([this] { eventLoop(); });
+    return true;
+#else
     work_ = std::make_unique<boost::asio::executor_work_guard<
         boost::asio::io_context::executor_type>>(boost::asio::make_work_guard(io_));
     if (!readThread_.joinable())
@@ -115,12 +135,23 @@ bool SerialPort::open(OpenMode mode)
         armRead();
     }
     return true;
+#endif
 }
 
 void SerialPort::close()
 {
     if (!port_.is_open()) return;
 
+#if defined(_WIN32)
+    // Stop the reader first; once evThread_ has joined nothing touches port_.
+    // Clearing the mask completes a pending WaitCommEvent with
+    // ERROR_OPERATION_ABORTED, which the loop treats as shutdown.
+    closing_ = true;
+    reading_ = false;
+    ::SetCommMask(port_.native_handle(), 0);
+    if (evThread_.joinable()) evThread_.join();
+    winRx_.reset();
+#else
     // Stop the io loop first; once run() has returned nothing touches port_.
     closing_ = true;
     reading_ = false;
@@ -128,6 +159,7 @@ void SerialPort::close()
     io_.stop();
     if (readThread_.joinable()) readThread_.join();
     io_.restart();
+#endif
 
     {
         boost::system::error_code ec;
@@ -183,14 +215,12 @@ void SerialPort::applyNativeMode()
 #if defined(_WIN32)
     HANDLE h = port_.native_handle();
     COMMTIMEOUTS to{};
-    // Interval timeout: an overlapped read completes 1 ms after the last byte
-    // (or when the buffer fills). asio cannot WaitCommEvent(EV_RXCHAR) like
-    // QSerialPort, so this timeout is the only completion trigger for short
-    // bursts; keep it minimal or every request-response round trip eats it as
-    // fixed latency. MAXDWORD is not an option: with zero total timeouts it
-    // makes ReadFile return immediately, and a zero-byte completion would be
-    // re-armed instantly, spinning the io_context thread.
-    to.ReadIntervalTimeout         = 1;
+    // Reads are driven by WaitCommEvent(EV_RXCHAR): the event says bytes are
+    // there, so ReadFile must return IMMEDIATELY with exactly what has
+    // arrived - MAXDWORD interval + zero total timeouts does that. A finite
+    // interval (the old plain-overlapped-read setup) would make every read
+    // wait out the driver's coarse timeout tick after the last byte.
+    to.ReadIntervalTimeout         = MAXDWORD;
     to.ReadTotalTimeoutMultiplier  = 0;
     to.ReadTotalTimeoutConstant    = 0;
     to.WriteTotalTimeoutMultiplier = 0;
@@ -234,7 +264,10 @@ void SerialPort::applyNativeMode()
 #endif
 }
 
-// ---- read loop -------------------------------------------------------------
+// ---- read path -------------------------------------------------------------
+// POSIX: asio reactor (epoll) completes async_read_some the moment any byte is
+// readable, so the loop below delivers with ~zero latency.
+#if !defined(_WIN32)
 
 // bufMx_ held. Called ONLY from the worker between completions, i.e. when no
 // read operation is pending. This is the single place allowed to move data
@@ -288,6 +321,117 @@ void SerialPort::handleRead(const boost::system::error_code& ec, std::size_t n)
     }
     if (onReadyRead_) onReadyRead_();   // outside bufMx_: user may call read() here
 }
+
+#endif  // !defined(_WIN32)
+
+#if defined(_WIN32)
+
+// ---- WinRxState -------------------------------------------------------------
+
+namespace detail {
+
+WinRxState::WinRxState()
+{
+    waitOv.hEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);  // auto-reset
+    readOv.hEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+}
+
+WinRxState::~WinRxState()
+{
+    if (waitOv.hEvent) ::CloseHandle(waitOv.hEvent);
+    if (readOv.hEvent) ::CloseHandle(readOv.hEvent);
+}
+
+} // namespace detail
+
+// ---- Windows reader thread ---------------------------------------------------
+//
+// QSerialPort's scheme, which asio cannot express (its IOCP handle service has
+// no WaitCommEvent): block in WaitCommEvent until EV_RXCHAR says bytes landed,
+// then drain the driver queue with immediate-return ReadFiles. Delivery
+// therefore starts on the FIRST byte of a burst and finishes with the last -
+// no COMMTIMEOUTS interval tail, whose driver-side tick (~10 ms regardless of
+// the requested 1 ms) was the residual latency after the interval=1 fix.
+
+void SerialPort::eventLoop()
+{
+    HANDLE h = port_.native_handle();
+    detail::WinRxState& st = *winRx_;
+
+    const auto abortWait = [&]() {   // real failure on a live port: stop reading
+        if (reading_.load() && !closing_.load()) {
+            reading_ = false;
+            fail(SerialError::ResourceError,
+                 "WaitCommEvent: error " + std::to_string(::GetLastError()));
+        }
+    };
+
+    while (reading_.load()) {
+        DWORD mask = 0;
+        BOOL ok = ::WaitCommEvent(h, &mask, &st.waitOv);
+        if (!ok && ::GetLastError() == ERROR_IO_PENDING) {
+            if (::WaitForSingleObject(st.waitOv.hEvent, INFINITE) != WAIT_OBJECT_0)
+                break;  // handle signalled abnormally; SetCommMask(0) break lands here
+            DWORD taken = 0;
+            if (!::GetOverlappedResult(h, &st.waitOv, &taken, FALSE)) {
+                abortWait();   // ERROR_OPERATION_ABORTED during close, or device gone
+                break;
+            }
+        } else if (!ok) {
+            abortWait();
+            break;
+        }
+        if (!reading_.load()) break;
+
+        if (mask & EV_ERR) {
+            DWORD errors = 0; COMSTAT stat{};
+            ::ClearCommError(h, &errors, &stat);  // framing/overrun noise: clear and carry on
+        }
+        if (!(mask & EV_RXCHAR)) continue;
+
+        // Drain everything the driver holds right now. With ReadIntervalTimeout
+        // = MAXDWORD each ReadFile completes immediately (ERROR_IO_PENDING is
+        // not expected; the bounded wait + CancelIoEx is a driver-paranoia net).
+        for (;;) {
+            DWORD n = 0;
+            BOOL r = ::ReadFile(h, st.scratch.data(), static_cast<DWORD>(st.scratch.size()),
+                                &n, &st.readOv);
+            if (!r && ::GetLastError() == ERROR_IO_PENDING) {
+                if (::WaitForSingleObject(st.readOv.hEvent, 50) != WAIT_OBJECT_0) {
+                    ::CancelIoEx(h, &st.readOv);
+                    DWORD done = 0;
+                    ::GetOverlappedResult(h, &st.readOv, &done, TRUE);
+                    break;  // queue momentarily empty: back to WaitCommEvent
+                }
+                if (!::GetOverlappedResult(h, &st.readOv, &n, FALSE)) {
+                    if (reading_.load() && !closing_.load()) {
+                        reading_ = false;
+                        fail(SerialError::ReadError,
+                             "read: error " + std::to_string(::GetLastError()));
+                    }
+                    return;
+                }
+            } else if (!r) {
+                if (reading_.load() && !closing_.load()) {
+                    reading_ = false;
+                    fail(SerialError::ReadError,
+                         "ReadFile: error " + std::to_string(::GetLastError()));
+                }
+                return;
+            }
+            if (n == 0) break;   // drained: re-arm the event wait
+
+            {
+                std::lock_guard<std::mutex> lk(bufMx_);
+                appendLocked(st.scratch.data(), n);
+            }
+            if (onReadyRead_) onReadyRead_();   // outside bufMx_: user may call read()
+            if (!reading_.load()) return;
+        }
+    }
+}
+
+#endif  // defined(_WIN32)
 
 // ---- write / flush / clear -------------------------------------------------
 
