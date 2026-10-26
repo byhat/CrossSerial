@@ -10,7 +10,9 @@
 #include <thread>
 #include <utility>
 
-#include "detail/WinRxState.hpp"
+#if defined(_WIN32)
+#  include "detail/WinRxState.hpp"  // pulls windows.h: keep out of POSIX TUs
+#endif
 
 #if !defined(_WIN32)
 #  include <fcntl.h>
