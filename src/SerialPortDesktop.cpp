@@ -27,7 +27,7 @@
 namespace cs {
 
 namespace {
-constexpr std::size_t kReadChunk = 16384;  // initial read arena (doubles on demand)
+constexpr std::size_t kReadChunk = 4096;  // initial read arena (doubles on demand)
 
 SerialError mapOpenError(const boost::system::error_code& ec)
 {
@@ -183,9 +183,14 @@ void SerialPort::applyNativeMode()
 #if defined(_WIN32)
     HANDLE h = port_.native_handle();
     COMMTIMEOUTS to{};
-    // Interval timeout: an overlapped read completes 50 ms after the last byte
-    // (or when the buffer fills) - the classic setup for event-driven reads.
-    to.ReadIntervalTimeout         = 50;
+    // Interval timeout: an overlapped read completes 1 ms after the last byte
+    // (or when the buffer fills). asio cannot WaitCommEvent(EV_RXCHAR) like
+    // QSerialPort, so this timeout is the only completion trigger for short
+    // bursts; keep it minimal or every request-response round trip eats it as
+    // fixed latency. MAXDWORD is not an option: with zero total timeouts it
+    // makes ReadFile return immediately, and a zero-byte completion would be
+    // re-armed instantly, spinning the io_context thread.
+    to.ReadIntervalTimeout         = 1;
     to.ReadTotalTimeoutMultiplier  = 0;
     to.ReadTotalTimeoutConstant    = 0;
     to.WriteTotalTimeoutMultiplier = 0;
